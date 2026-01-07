@@ -50,6 +50,6 @@
 2. 重复3.1中的步骤，完成编译并运行。
 
 
-Uploading video.mp4…
+https://github.com/user-attachments/assets/be0b6e8c-1b00-4550-8f39-513f3b976266
 
 
