@@ -219,6 +219,12 @@ void ui_display::on_btn_vid_SetApply_clicked()
     // 直接调用 updateSettings，线程内部会自动暂停、重配、重启
     m_VideoManager->updateSettings(sz.width(), sz.height(), fmt, fps);
 
+    // 同步通知 HID 控制器源分辨率已变更
+    if (m_HidManager && lbl_ui_VideoShow) {
+        // 传入新的源分辨率 (sz) 和当前的控件大小
+        m_HidManager->setSourceResolution(sz, lbl_ui_VideoShow->size());
+    }
+
     // 更新 UI 状态
     btn_vid_StrOn->setAwesome(ElaIconType::Pause);
 }
@@ -529,7 +535,8 @@ void ui_display::initCenter(QWidget *centerContainer)
     lbl_ui_VideoShow->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Ignored);
 
     // 安装事件过滤器
-    lbl_ui_VideoShow->setMouseTracking(false);
+    lbl_ui_VideoShow->setMouseTracking(true);
+
     lbl_ui_VideoShow->installEventFilter(m_HidManager);
     this->setFocusPolicy(Qt::StrongFocus);
     this->installEventFilter(m_HidManager);

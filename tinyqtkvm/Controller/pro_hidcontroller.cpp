@@ -40,6 +40,7 @@ HidController::HidController(QObject *parent): QObject(parent),
     m_isLeftButtonDown = false;
     m_longPressHandled = false;
     m_hasMovedSignificantly = false;
+    m_lastMouseMoveTime = 0;
     m_elapsedTimer.start();
 
     // 统一的主循环定时器
@@ -156,11 +157,14 @@ bool HidController::eventFilter(QObject *watched, QEvent *event) {
     if (m_currentMode == MODE_NONE || !m_driver) {
         return QObject::eventFilter(watched, event);
     }
+
     // 处理 Resize
-    if (event->type() == QEvent::Resize && watched->isWidgetType()) {
+    // 只有当"被监视对象"是 QLabel (视频显示控件) 时，才更新尺寸。
+    // 过滤掉主窗口(ui_display)的 Resize 事件，防止将包含侧边栏的窗口尺寸误判为视频区域尺寸。
+    if (event->type() == QEvent::Resize && watched->inherits("QLabel")) {
         m_widgetSize = static_cast<QWidget*>(watched)->size();
         updateScaleParams();
-        return false;
+        return false; // 不拦截 Resize，让控件自己也能处理布局
     }
 
     // 解析并 Push
@@ -174,7 +178,7 @@ bool HidController::eventFilter(QObject *watched, QEvent *event) {
         case QEvent::MouseMove:
         case QEvent::Wheel:
             if (watched->isWidgetType()) {
-                parseLocalMouse(watched, event, event->type());
+                parseLocalMouse(watched, event);//, event->type());
                 return true; // 拦截
             }
             break;
@@ -184,17 +188,53 @@ bool HidController::eventFilter(QObject *watched, QEvent *event) {
 }
 
 // 本地鼠标解析
-void HidController::parseLocalMouse(QObject *watched, QEvent *evt, QEvent::Type type)
+void HidController::parseLocalMouse(QObject *watched, QEvent *evt)
 {
-    QMouseEvent *e = static_cast<QMouseEvent*>(evt);
+    // === 1. 优先处理滚轮事件 (强制走相对模式) ===
+    if (evt->type() == QEvent::Wheel) {
+        QWheelEvent *we = static_cast<QWheelEvent*>(evt);
 
-    // --- 1. 绝对模式 ---
+        // 计算滚轮步进
+        int delta = we->angleDelta().y();
+        int8_t wheelByte = 0;
+        if (delta > 0) wheelByte = 1;
+        else if (delta < 0) wheelByte = -1;
+
+        if (wheelByte != 0) {
+            HidCommand cmd;
+            cmd.type = HidCommand::CMD_MOUSE_REL; // 强制使用 REL 模式
+            cmd.param1 = 0; // xRel
+            cmd.param2 = 0; // yRel
+            cmd.param3 = 0; // buttons
+            cmd.param4 = wheelByte;
+            HidPacketQueue::instance()->push(cmd);
+        }
+        // 滚轮处理完毕，直接返回，不走下面的坐标计算逻辑
+        return;
+    }else if (evt->type() == QEvent::MouseMove) {
+        // === 鼠标移动限流逻辑 === 50Hz采样降频 === 仅针对 MouseMove
+        qint64 now = m_elapsedTimer.elapsed();
+        if (now - m_lastMouseMoveTime < 20) {
+            return; // 距离上次发送不足 20ms，直接丢弃该包
+        }
+        m_lastMouseMoveTime = now; // 更新发送时间
+    }
+
+
+    // === 2. 处理普通鼠标事件 (按键/移动) ===
+    // 此时肯定是 MouseButtonPress / Release / Move
+    QMouseEvent *me = static_cast<QMouseEvent*>(evt);
+    // [QT5] 直接使用 pos()
+    QPoint currentPos = me->pos();
+    Qt::MouseButtons buttons = me->buttons();
+
+    // === 3. 绝对模式处理 ===
     if (m_currentMode == MODE_ABSOLUTE) {
         if (m_displayRect.isEmpty()) return;
 
-        // 计算 0-4095 坐标
-        int realX = e->pos().x() - m_displayRect.x();
-        int realY = e->pos().y() - m_displayRect.y();
+        // 计算 0-4095 坐标 (基于 currentPos，无论是移动还是滚轮都适用)
+        int realX = currentPos.x() - m_displayRect.x();
+        int realY = currentPos.y() - m_displayRect.y();
 
         int hidX = 0, hidY = 0;
         if (m_displayRect.width() > 0)
@@ -207,36 +247,34 @@ void HidController::parseLocalMouse(QObject *watched, QEvent *evt, QEvent::Type 
         cmd.type = HidCommand::CMD_MOUSE_ABS;
         cmd.param1 = hidX;
         cmd.param2 = hidY;
-        cmd.param3 = getHidButtonState(e->buttons());
-        cmd.param4 = 0; // Wheel TODO: 添加滚轮支持
+        cmd.param3 = getHidButtonState(buttons);
+        cmd.param4 = 0; // 移动事件不带滚轮 (滚轮已在上方独立处理)
         HidPacketQueue::instance()->push(cmd);
     }
 
-    // --- 2. 相对模式 (触控逻辑状态机更新) ---
+    // === 4. 相对模式处理 ===
     else if (m_currentMode == MODE_RELATIVE) {
-        // 这里只负责生成 REL 移动包入队，和更新长按状态
-        // 为了简化代码，这里展示核心的状态更新逻辑：
-
-        if (type == QEvent::MouseButtonPress && e->button() == Qt::LeftButton) {
+        QEvent::Type type = evt->type();
+        if (type == QEvent::MouseButtonPress && me->button() == Qt::LeftButton) {
             m_isLeftButtonDown = true;
             m_pressStartTime = m_elapsedTimer.elapsed();
-            m_pressStartPos = e->globalPos();
+            // [QT5] 使用 globalPos()
+            m_pressStartPos = me->globalPos();
             m_longPressHandled = false;
             m_hasMovedSignificantly = false;
         }
         else if (type == QEvent::MouseMove) {
-            // 计算相对位移
-            static QPoint lastPos = e->globalPos(); // 简单起见，实际应在成员变量维护
-            int dx = e->globalPos().x() - lastPos.x();
-            int dy = e->globalPos().y() - lastPos.y();
-            lastPos = e->globalPos();
+            // [QT5] 使用 globalPos() 计算差值
+            static QPoint lastPos = me->globalPos();
+            int dx = me->globalPos().x() - lastPos.x();
+            int dy = me->globalPos().y() - lastPos.y();
+            lastPos = me->globalPos();
 
-            // 判断是否大幅移动 (用于取消长按)
-            if ((e->globalPos() - m_pressStartPos).manhattanLength() > 5) {
+            // 判断是否大幅移动
+            if ((me->globalPos() - m_pressStartPos).manhattanLength() > 5) {
                 m_hasMovedSignificantly = true;
             }
 
-            // 构造移动命令 Push
             HidCommand cmd;
             cmd.type = HidCommand::CMD_MOUSE_REL;
             cmd.param1 = qBound(-127, dx, 127);
@@ -245,11 +283,9 @@ void HidController::parseLocalMouse(QObject *watched, QEvent *evt, QEvent::Type 
             cmd.param4 = 0;
             HidPacketQueue::instance()->push(cmd);
         }
-        else if (type == QEvent::MouseButtonRelease && e->button() == Qt::LeftButton) {
+        else if (type == QEvent::MouseButtonRelease && me->button() == Qt::LeftButton) {
             m_isLeftButtonDown = false;
-            // 如果不是长按，且没有大幅移动，则视为点击
             if (!m_longPressHandled && !m_hasMovedSignificantly) {
-                // 发送点击：先按下，再松开 (这会导致队列瞬间增加两个包)
                 HidCommand clickDown = {HidCommand::CMD_MOUSE_REL, 0, 0, MOUSE_LEFT, 0};
                 HidCommand clickUp   = {HidCommand::CMD_MOUSE_REL, 0, 0, 0, 0};
                 HidPacketQueue::instance()->push(clickDown);

@@ -41,9 +41,10 @@ private slots:
 
 private:
     //本地鼠标事件
-    void parseLocalMouse(QObject *watched, QEvent *e, QEvent::Type type);
+    void parseLocalMouse(QObject *watched, QEvent *evt);
     //本地键盘事件
     void parseLocalKey(QKeyEvent *e, bool isPress);
+
 
     uint8_t qtModifiersToHid(Qt::KeyboardModifiers modifiers);
 
@@ -72,7 +73,11 @@ private:
     bool m_longPressHandled;      // 长按是否已经处理过
     bool m_hasMovedSignificantly; // 是否发生了明显移动
 
-    QElapsedTimer m_elapsedTimer; // 全局计时器
+    // === 用于鼠标移动限流 ===
+    qint64 m_lastMouseMoveTime; // 上一次处理MouseMove的时间戳
+
+    // 全局计时器
+    QElapsedTimer m_elapsedTimer;
 };
 
 #endif // PRO_HIDCONTROLLER_H
