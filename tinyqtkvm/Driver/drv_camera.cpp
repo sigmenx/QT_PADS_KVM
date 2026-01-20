@@ -3,6 +3,9 @@
 #include <unistd.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
+#include <linux/videodev2.h>
+#include <cstring>
+#include <cstdlib> // for calloc/free
 
 CameraDevice::CameraDevice(QObject *parent) : QObject(parent),
     m_fd(-1), m_isCapturing(false), m_buffers(nullptr), m_nBuffers(0)
@@ -11,7 +14,6 @@ CameraDevice::CameraDevice(QObject *parent) : QObject(parent),
 
 CameraDevice::~CameraDevice()
 {
-    //stopCapturing();
     closeDevice();
 }
 
@@ -30,19 +32,17 @@ bool CameraDevice::openDevice(const QString &devicePath)
 void CameraDevice::closeDevice()
 {
     stopCapturing();
-    usleep(200000);//延时200ms
+    usleep(20000); // 延时20ms即可，200ms太长
     if (m_fd != -1) {
         ::close(m_fd);
-        usleep(200000);//延时200ms
         m_fd = -1;
     }
-
 }
 
 bool CameraDevice::isOpened() const { return m_fd != -1; }
 bool CameraDevice::isCapturing() const { return m_isCapturing; }
 
-// ================= V4L2 查询逻辑 (封装简化) =================
+// ================= V4L2 查询逻辑 =================
 
 QList<QPair<QString, unsigned int>> CameraDevice::getSupportedFormats()
 {
@@ -143,7 +143,7 @@ bool CameraDevice::startCapturing(int width, int height, unsigned int pixelForma
     enum v4l2_buf_type type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
     if (ioctl(m_fd, VIDIOC_STREAMON, &type) < 0) return false;
 
-    // 6. 预分配 RGB 缓冲区，避免循环中重复 new
+    // 6. 预分配 RGB 缓冲区 (仅 YUYV 需要)
     if (m_pixelFormat == V4L2_PIX_FMT_YUYV) {
         m_rgbBuffer.resize(m_width * m_height * 3);
     }
@@ -154,29 +154,23 @@ bool CameraDevice::startCapturing(int width, int height, unsigned int pixelForma
 
 void CameraDevice::stopCapturing()
 {
-    // 如果没有在采集，直接返回 (但要注意如果是析构调用，无论如何都要清理)
     if (!m_isCapturing) return;
 
-    // 1. 停止视频流 (Stream Off)
+    // 1. 停止视频流
     enum v4l2_buf_type type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-    if (ioctl(m_fd, VIDIOC_STREAMOFF, &type) < 0) {
-        perror("Streamoff failed");
-    }
+    ioctl(m_fd, VIDIOC_STREAMOFF, &type);
 
-    // 2. 解除用户空间映射 (munmap)
+    // 2. 解除映射
     freeMmap();
     if (m_buffers) {
         free(m_buffers);
         m_buffers = nullptr;
     }
 
-    // =========================================================
-    // 【关键修正】 3. 释放内核缓冲区 (REQBUFS count=0)
-    // 必须告诉内核释放内存，否则下次 S_FMT 会报 EBUSY
-    // =========================================================
+    // 3. 释放内核缓冲区
     struct v4l2_requestbuffers req;
     memset(&req, 0, sizeof(req));
-    req.count = 0; // 0 表示释放
+    req.count = 0;
     req.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
     req.memory = V4L2_MEMORY_MMAP;
     ioctl(m_fd, VIDIOC_REQBUFS, &req);
@@ -184,8 +178,6 @@ void CameraDevice::stopCapturing()
     m_nBuffers = 0;
     m_isCapturing = false;
 }
-
-
 
 void CameraDevice::initMmap()
 {
@@ -210,60 +202,106 @@ void CameraDevice::freeMmap()
     }
 }
 
-// ================= 获取帧逻辑 =================
+// =================  视频数据流 拆分 API 实现 =================
 
-bool CameraDevice::captureFrame(QImage &image)
+// 1. 出队：获取原始数据
+uint8_t* CameraDevice::dequeue(size_t &out_len, int &out_index)
 {
-    if (!m_isCapturing || !m_buffers || m_fd < 0) return false;
+    if (!m_isCapturing || !m_buffers || m_fd < 0) return nullptr;
 
     struct v4l2_buffer buf;
     memset(&buf, 0, sizeof(buf));
     buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
     buf.memory = V4L2_MEMORY_MMAP;
 
-    // 1. 出队 (DQBUF)
-    if (ioctl(m_fd, VIDIOC_DQBUF, &buf) < 0) return false;
-
-    // 2. 数据处理
-    bool success = false;
-    unsigned char *rawData = (unsigned char*)m_buffers[buf.index].start;
-
-    if (m_pixelFormat == V4L2_PIX_FMT_YUYV) {
-        // 使用成员变量 buffer，无需 new
-        yuyv_to_rgb(rawData, m_rgbBuffer.data(), m_width, m_height);
-        // Deep copy to QImage (QImage wraps the data, we make a copy via copy())
-        // 注意：QImage 构造函数默认不拷贝数据，但我们需要让 image 独立于 m_rgbBuffer，所以建议 copy
-        // 或者直接生成 Image。为了安全，这里生成一个新的 image。
-        // 260104：去掉 .copy()。QImage 只是一个 Header，指向 m_rgbBuffer
-        image = QImage(m_rgbBuffer.data(), m_width, m_height, QImage::Format_RGB888);//.copy();
-        success = true;
-    } else if (m_pixelFormat == V4L2_PIX_FMT_MJPEG) {
-        image.loadFromData(rawData, buf.bytesused);
-        success = true;
+    // 阻塞等待硬件完成一帧采集
+    if (ioctl(m_fd, VIDIOC_DQBUF, &buf) < 0) {
+        // perror("DQBUF failed"); // 调试时可打开
+        return nullptr;
     }
 
-    // 3. 入队 (QBUF)
-    ioctl(m_fd, VIDIOC_QBUF, &buf);
+    out_index = buf.index;
+    out_len = buf.bytesused;
 
-    return success;
+    // 返回 mmap 地址，直接指向内核缓冲，无需拷贝
+    return static_cast<uint8_t*>(m_buffers[buf.index].start);
 }
 
-void CameraDevice::yuyv_to_rgb(unsigned char *yuyv, unsigned char *rgb, int width, int height)
+// 2. 入队：归还缓冲区
+void CameraDevice::enqueue(int index)
 {
-    // 你的原始算法，未改动
+    if (m_fd < 0 || index < 0) return;
+
+    struct v4l2_buffer buf;
+    memset(&buf, 0, sizeof(buf));
+    buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+    buf.memory = V4L2_MEMORY_MMAP;
+    buf.index = index;
+
+    // 告诉内核该缓冲已处理完毕，可以再次填充数据
+    ioctl(m_fd, VIDIOC_QBUF, &buf);
+}
+
+// 3. 转换：Raw -> QImage
+void CameraDevice::toQImage(const uint8_t* rawData, size_t len, QImage &outImage)
+{
+    if (!rawData) return;
+
+    if (m_pixelFormat == V4L2_PIX_FMT_YUYV) {
+        // 软转码：YUYV -> RGB (写入 m_rgbBuffer)
+        yuyv_to_rgb(rawData, m_rgbBuffer.data(), m_width, m_height);
+
+        // 深拷贝：生成独立的 QImage，防止 m_rgbBuffer 在下一帧被覆盖时影响 UI 显示
+        // 注意：QImage(data, ...) 构造函数默认浅拷贝，必须加 .copy()
+        outImage = QImage(m_rgbBuffer.data(), m_width, m_height, QImage::Format_RGB888).copy();
+
+    } else if (m_pixelFormat == V4L2_PIX_FMT_MJPEG) {
+        // MJPEG 直接解压
+        outImage.loadFromData(rawData, len);
+        // loadFromData 内部会自动创建深拷贝的内存
+    }
+}
+
+// [兼容接口] 旧逻辑的 wrapper
+bool CameraDevice::captureFrame(QImage &image)
+{
+    size_t len = 0;
+    int index = -1;
+
+    // 1. 获取原始数据
+    uint8_t* raw = dequeue(len, index);
+    if (!raw) return false;
+
+    // 2. 转换为图像
+    toQImage(raw, len, image);
+
+    // 3. 归还缓冲区
+    enqueue(index);
+
+    return true;
+}
+
+// 内部算法 (输入改为 const)
+void CameraDevice::yuyv_to_rgb(const unsigned char *yuyv, unsigned char *rgb, int width, int height)
+{
     int y0, u, y1, v;
     int r0, g0, b0, r1, g1, b1;
     int i = 0, j = 0;
+
     for (int row = 0; row < height; row++) {
         for (int col = 0; col < width; col += 2) {
             y0 = yuyv[i++]; u  = yuyv[i++];
             y1 = yuyv[i++]; v  = yuyv[i++];
+
+            // 你的原始优化算法
             r0 = y0 + 1.402 * (v - 128);
             g0 = y0 - 0.34414 * (u - 128) - 0.71414 * (v - 128);
             b0 = y0 + 1.772 * (u - 128);
+
             r1 = y1 + 1.402 * (v - 128);
             g1 = y1 - 0.34414 * (u - 128) - 0.71414 * (v - 128);
             b1 = y1 + 1.772 * (u - 128);
+
             auto clamp = [](int x) { return (x < 0) ? 0 : ((x > 255) ? 255 : x); };
             rgb[j++] = clamp(r0); rgb[j++] = clamp(g0); rgb[j++] = clamp(b0);
             rgb[j++] = clamp(r1); rgb[j++] = clamp(g1); rgb[j++] = clamp(b1);

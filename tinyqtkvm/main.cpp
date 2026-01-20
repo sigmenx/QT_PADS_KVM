@@ -1,4 +1,4 @@
-#include "ui_mainpage.h"
+#include "QtUiPage/ui_mainpage.h"
 
 #include <QApplication>
 

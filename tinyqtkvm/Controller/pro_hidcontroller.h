@@ -1,7 +1,8 @@
 #ifndef PRO_HIDCONTROLLER_H
 #define PRO_HIDCONTROLLER_H
 
-#include "drv_ch9329.h"
+#include "../Driver/drv_ch9329.h"
+#include "../Tool/safe_queue.h"
 
 #include <QWidget>
 #include <QTimer>
@@ -35,18 +36,22 @@ protected:
     // === 核心：事件过滤器 ===
     bool eventFilter(QObject *watched, QEvent *event) override;
 private slots:
-    // 长按超时槽函数
-    void onLongPressTimeout();
+    // 统一的主循环 (10ms)
+    void onMainLoop();
 
 private:
-    //鼠标相关
-    void processMouse(QObject *watched, QEvent *e, QEvent::Type type);
-    //键盘相关
-    void processKey(QKeyEvent *e, bool isPress);
+    //本地鼠标事件
+    void parseLocalMouse(QObject *watched, QEvent *e, QEvent::Type type);
+    //本地键盘事件
+    void parseLocalKey(QKeyEvent *e, bool isPress);
+
     uint8_t qtModifiersToHid(Qt::KeyboardModifiers modifiers);
+
     void initKeyMap();
 
 private:
+    // 一个轮询定时器
+    QTimer *m_mainLoopTimer;
 
     // === 成员变量 ===
     CH9329Driver *m_driver;
@@ -60,19 +65,14 @@ private:
     // === 预计算的映射参数 (避免每次鼠标移动都做除法) ===
     QRect m_displayRect; // 视频实际显示的区域 (去掉了黑边)
 
-    // === 相对模式/触控逻辑专用变量 ===          //TODO：简化下面这一堆
-    QPoint m_lastMousePos;    // 上次坐标
-    QPoint m_pressGlobalPos;  // 按下时的坐标（用于计算总位移，判断是点击还是滑动）
-    bool m_hasMoved;          // 是否发生了有效位移
-    bool m_longPressTriggered;// 是否已经触发了长按
-    QTimer *m_longPressTimer; // 长按定时器
+    // === 长按与触控逻辑变量 ===
+    bool m_isLeftButtonDown;      // 左键是否按下
+    qint64 m_pressStartTime;      // 按下时的时间戳
+    QPoint m_pressStartPos;       // 按下时的坐标
+    bool m_longPressHandled;      // 长按是否已经处理过
+    bool m_hasMovedSignificantly; // 是否发生了明显移动
 
-    // === 丢弃事件 ===
-    QElapsedTimer m_elapsedTimer; // 计时器
-    qint64 m_lastSendTime;        // 上次发送的时间戳
-    // 相对模式累积量 (依然需要，防止丢弃移动距离)
-    int m_accumRelDx;
-    int m_accumRelDy;
+    QElapsedTimer m_elapsedTimer; // 全局计时器
 };
 
 #endif // PRO_HIDCONTROLLER_H

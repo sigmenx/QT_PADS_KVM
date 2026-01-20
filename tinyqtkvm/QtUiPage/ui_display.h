@@ -4,16 +4,18 @@
 #include <QLabel>
 #include <QBoxLayout>
 #include <QGroupBox>
+#include <QLineEdit>
 
 // 引入 Ela 控件
 #include "ElaIconButton.h"
 #include "ElaPushButton.h"
 #include "ElaComboBox.h"
 #include "ElaRadioButton.h"
+#include "ElaToggleButton.h"
 
 // 引入控制器头文件
-#include "pro_videothread.h"
-#include "pro_hidcontroller.h"
+#include "../Controller/pro_videothread.h"
+#include "../Controller/pro_hidcontroller.h"
 
 // 修改为继承 QWidget
 class ui_display : public QWidget
@@ -25,13 +27,23 @@ public:
     ~ui_display();
 
 private:
+    // === UI 构建总函数  ===
     void initUI();          // 总初始化
-    void startCameraLogic();
-    void startSerialLogic();
     void initTopBar();      // 初始化顶部
     void initCenter(QWidget *centerContainer); // 初始化中间区域
     void initSideBar();     // 初始化侧边栏
+    // === UI 构建辅助函数  ===
+    // 1. 快速创建一个统一风格的图标按钮
+    ElaIconButton* createIconButton(ElaIconType::IconName icon, const char* memberSlot = nullptr);
+    // 2. 侧边栏：向布局中添加一行 "Label + Widget"
+    void addSideSettingItem(QLayout* layout, const QString &text, QWidget *widget);
+    // 3. 顶部栏：向布局中添加一组 "分隔线 + 标题 + 控件列表"
+    void addTopControlGroup(QHBoxLayout* layout, const QString &title, const std::initializer_list<QWidget*> &widgets);
+    // 4. 通用样式设置 (替代原来的 setmyWidget 等)
+    void applyContainerStyle(QWidget* widget, int w, int h, const QString& color);
 
+    void startCameraLogic();
+    void startSerialLogic();
 
     // === 通用的下拉框刷新模板函数 ===
     // 参数：目标下拉框、数据列表、如何从数据中获取显示文本的Lambda函数
@@ -51,7 +63,6 @@ private:
         }
     }
 
-
 private slots:
     // --- 业务逻辑槽函数 ---
     void handleFrame(QImage image);     //接收子线程图像
@@ -61,6 +72,7 @@ private slots:
     void on_btn_vid_PicCap_clicked();   // 截图
     void on_btn_vid_SetApply_clicked(); // 应用视频设置
     void on_btn_hid_SetApply_clicked(); // 串口应用设置
+    void on_btn_web_Start_clicked();    // 网络转发开启
 
     // --- 界面交互槽函数 ---
     void on_btn_ui_HideTop_clicked();   // 隐藏顶部
@@ -122,11 +134,17 @@ private:
     ElaComboBox *cmb_hid_DevSelect;
     ElaPushButton *btn_hid_SetApply;
 
+    // 3.3 IP-KVM 设置
+    QLineEdit *txt_web_Port;    // "8080" 输入框
+    ElaToggleButton *btn_web_Start;    // "开启" 按钮
+    //ElaPushButton *btn_web_Settings; // "设置" 按钮
+
 //窗口关闭
 signals:
     void windowClosed(); // 定义关闭信号
 protected:
     void closeEvent(QCloseEvent *event) override; // 重写关闭事件
+
 };
 
 #endif // UI_DISPLAY_H

@@ -3,9 +3,23 @@
 #include <QDebug>
 #include <QFileDialog>
 #include <QSerialPortInfo>
+#include <QHostAddress>
+#include <QNetworkInterface>
+#include <QMessageBox>
+
+// === 通用样式常量定义 ===
+namespace Styles {
+    const QString LABEL_FONT = "QLabel { background-color: transparent; color: #333333; border: none; padding: 0px; font-size: 11pt; }";
+    const QString ICON_BTN = "ElaIconButton { background-color: #FFFFFF; border-radius: 4px; } ElaIconButton:hover { background-color: #E6E6E6; border: 1px solid #A0A0A0; }";
+    const QString RADIO_BTN = "QLabel { background-color: transparent; color: #333333; border: none; padding: 0px; font-size: 11pt; }";
+    static const QString HIDETOP_BTN_ACTIVE = "ElaIconButton { background-color: #0078D4; border-radius: 4px; border: 1px solid #005A9E; }"
+                                              "ElaIconButton:hover { background-color: #005A9E; }";
+    static const QString HIDETOP_BTN_NORMAL = "ElaIconButton { background-color: #FFFFFF; border-radius: 4px; border: 0px solid #C0C0C0; }"
+                                              "ElaIconButton:hover { background-color: #E6E6E6; border: 1px solid #A0A0A0; }";
+}
 
 ui_display::ui_display(QString camdevPath, QWidget *parent)
-    : QWidget(parent), // 修改为继承 QWidget
+    : QWidget(parent), // 继承 QWidget
       m_camdevPath(camdevPath)
 {
     setAttribute(Qt::WA_DeleteOnClose); // 关闭即销毁对象
@@ -22,6 +36,8 @@ ui_display::ui_display(QString camdevPath, QWidget *parent)
     startCameraLogic();
     // 4. 初始化HID设备参数 ===
     startSerialLogic();
+    //    初始化网络HID数据接收槽函数
+    //connect(m_VideoManager, &VideoController::remoteHidPacketReceived, m_HidManager, &HidController::onNetworkHidReceived);
 }
 
 ui_display::~ui_display()
@@ -96,8 +112,6 @@ void ui_display::on_btn_hid_SetApply_clicked()
     int baudRate = cmb_hid_BtrSelect->currentData().toInt();
 
     // 2. 通过处理类尝试连接
-    // openSerial 内部封装了 closeDevice, init 和 checkConnection
-    //bool isConnected = m_HidManager->openSerial(portName, baudRate);
     bool isConnected = m_HidManager->initDriver(portName, baudRate);
 
     // 3. 更新单选框使能状态
@@ -108,7 +122,7 @@ void ui_display::on_btn_hid_SetApply_clicked()
     if (isConnected) {
         // === 成功逻辑 ===
         lbl_vid_HIDStatus->setText("通信成功");
-        lbl_vid_HIDStatus->setStyleSheet("color: #00CC00; border: none; padding: 0px;"); // 绿色高亮
+        lbl_vid_HIDStatus->setStyleSheet("QLabel { background-color: transparent; color: #00CC00; border: none; padding: 0px; font-size: 11pt; }");// 绿色高亮
 
         // 连接成功后，默认进入绝对坐标模式
         rbt_hid_AbsMode->setChecked(true);
@@ -122,7 +136,7 @@ void ui_display::on_btn_hid_SetApply_clicked()
     } else {
         // === 失败逻辑 ===
         lbl_vid_HIDStatus->setText("通信失败");
-        lbl_vid_HIDStatus->setStyleSheet("color: #FF0000; border: none; padding: 0px;"); // 红色高亮
+        lbl_vid_HIDStatus->setStyleSheet("QLabel { background-color: transparent; color: #FF0000; border: none; padding: 0px; font-size: 11pt; }");// 红色高亮
 
         // 选中 "HID关" (失能控制)
         if (rbt_hid_EnCtrl) rbt_hid_EnCtrl->setChecked(true);
@@ -196,6 +210,11 @@ void ui_display::on_btn_vid_SetApply_clicked()
     unsigned int fmt = cmb_vid_FmtSelect->currentData().toUInt();
     QSize sz = cmb_vid_ResSelect->currentData().toSize();
     int fps = cmb_vid_FpsSelect->currentData().toInt();
+
+    if(btn_web_Start->getIsToggled() && fmt != V4L2_PIX_FMT_YUYV){
+        QMessageBox::warning(this, "提示", "请先关闭IP-KVM");
+        return;
+    }
 
     // 直接调用 updateSettings，线程内部会自动暂停、重配、重启
     m_VideoManager->updateSettings(sz.width(), sz.height(), fmt, fps);
@@ -271,6 +290,42 @@ void ui_display::on_btn_vid_PicCap_clicked()
 }
 
 // ==========================================
+// 网络转发业务逻辑槽函数
+// ==========================================
+void ui_display::on_btn_web_Start_clicked()
+{
+    bool iswebRunning = btn_web_Start->getIsToggled();  //true为开启
+    if (iswebRunning) {
+        // === 准备开启 ===
+        // 1. 获取当前格式和端口
+        unsigned int currentFmt = cmb_vid_FmtSelect->currentData().toUInt();
+        bool portOk = false;
+        int port = txt_web_Port->text().toInt(&portOk);
+
+        // 2. 校验：必须是 YUYV 格式 且 端口有效
+        if (currentFmt == V4L2_PIX_FMT_YUYV && portOk && port > 0 && port <= 65535) {
+            // 3. 尝试启动
+            if (m_VideoManager->startServer(port)) {
+                // 成功：改变按钮状态
+                btn_web_Start->setText("停止");
+            } else {
+                QMessageBox::critical(this, "错误", "启动服务失败，端口可能被占用");
+                btn_web_Start->setIsToggled(false);
+            }
+        } else {
+            // 失败：弹窗提示
+            QMessageBox::warning(this, "提示", "格式未置YUYV或端口错误");
+            btn_web_Start->setIsToggled(false);
+        }
+    } else {
+        // === 准备停止 ===
+        m_VideoManager->stopServer();
+        // 恢复按钮状态
+        btn_web_Start->setText("开启");
+    }
+}
+
+// ==========================================
 // 界面交互槽函数
 // ==========================================
 
@@ -307,224 +362,179 @@ void ui_display::on_btn_vid_FullScr_clicked()
 void ui_display::on_btn_ui_HideTop_clicked()
 {
     m_topbarvisiable = !m_topbarvisiable;
-    // 定义常量样式
-    static const QString STYLE_ACTIVE =
-        "ElaIconButton { background-color: #0078D4; border-radius: 4px; border: 1px solid #005A9E; }"
-        "ElaIconButton:hover { background-color: #005A9E; }";
-    static const QString STYLE_NORMAL =
-        "ElaIconButton { background-color: #FFFFFF; border-radius: 4px; border: 0px solid #C0C0C0; }"
-        "ElaIconButton:hover { background-color: #E6E6E6; border: 1px solid #A0A0A0; }";
-
     if (m_topbarvisiable) {
-        btn_ui_HideTop->setStyleSheet(STYLE_ACTIVE);
+        btn_ui_HideTop->setStyleSheet(Styles::HIDETOP_BTN_ACTIVE);
         btn_ui_HideTop->setLightIconColor(Qt::white);
     } else {
-        btn_ui_HideTop->setStyleSheet(STYLE_NORMAL);
+        btn_ui_HideTop->setStyleSheet(Styles::HIDETOP_BTN_NORMAL);
         btn_ui_HideTop->setLightIconColor(Qt::black);
     }
 }
 
 // ==========================================
-// 界面初始化部分
+// 界面初始化部分 辅助函数实现
 // ==========================================
+
+// 统一设置容器样式
+void ui_display::applyContainerStyle(QWidget* widget, int w, int h, const QString& color) {
+    if (h != 0) widget->setFixedHeight(h);
+    if (w != 0) widget->setFixedWidth(w);
+    widget->setStyleSheet(QString("background-color:%1; border-bottom: 1px solid #dcdcdc;").arg(color));
+}
+
+// 快速创建图标按钮工厂函数
+ElaIconButton* ui_display::createIconButton(ElaIconType::IconName icon, const char* memberSlot) {
+    ElaIconButton* btn = new ElaIconButton(icon, this);
+    btn->setFixedSize(34, 34);
+    btn->setStyleSheet(Styles::ICON_BTN);
+    btn->setAttribute(Qt::WA_StyledBackground, true);
+    if (memberSlot) {
+        connect(btn, SIGNAL(clicked()), this, memberSlot);
+    }
+    return btn;
+}
+
+// 顶部栏组生成器
+void ui_display::addTopControlGroup(QHBoxLayout* layout, const QString &title, const std::initializer_list<QWidget*> &widgets) {
+    // 1. 分隔线
+    QFrame *line = new QFrame(this);
+    line->setFrameShape(QFrame::VLine);
+    line->setStyleSheet("color: #A0A0A0;");
+    line->setFixedHeight(24);
+
+    layout->addSpacing(5);
+    layout->addWidget(line);
+    layout->addSpacing(5);
+
+    // 2. 标题
+    QLabel *lbl = new QLabel(title, this);
+    lbl->setStyleSheet(Styles::LABEL_FONT);
+    layout->addWidget(lbl);
+    layout->addSpacing(5);
+
+    // 3. 批量添加控件
+    for (auto w : widgets) {
+        layout->addWidget(w);
+    }
+}
+
+// 侧边栏行生成器
+void ui_display::addSideSettingItem(QLayout* layout, const QString &text, QWidget *widget) {
+    QLabel* lbl = new QLabel(text, this);
+    lbl->setStyleSheet(Styles::LABEL_FONT);
+    layout->addWidget(lbl);
+    layout->addWidget(widget);
+}
+
+// ==========================================
+// 界面初始化实现
+// ==========================================
+
 void ui_display::initUI()
 {
-    // 主布局：垂直
     QVBoxLayout *mainLayout = new QVBoxLayout(this);
-    // 这里设置为0是可以的，因为操作系统会提供外部边框
     mainLayout->setContentsMargins(0, 0, 0, 0);
     mainLayout->setSpacing(0);
 
-    // 1. 顶部
     initTopBar();
     mainLayout->addWidget(m_topWidget);
 
-    // 2. 中间 (包含视频和侧边栏)
     QWidget *centerContainer = new QWidget(this);
     QHBoxLayout *centerLayout = new QHBoxLayout(centerContainer);
     centerLayout->setContentsMargins(0, 0, 0, 0);
     centerLayout->setSpacing(0);
 
-    // 2.1 视频部分（视频lbl+隐藏按钮）
-    initCenter(centerContainer);
-    // 2.2 侧边部分
-    initSideBar();
+    initCenter(centerContainer); // 初始化视频区
+    initSideBar();               // 初始化侧边栏
 
-    centerLayout->addWidget(m_videoContainer, 1); // 权重1，拉伸
-    centerLayout->addWidget(m_sideBarWidget, 0);  // 权重0，固定
+    centerLayout->addWidget(m_videoContainer, 1);
+    centerLayout->addWidget(m_sideBarWidget, 0);
 
-    // 添加到主窗口布局
     mainLayout->addWidget(centerContainer);
 }
 
 void ui_display::initTopBar()
 {
     m_topWidget = new QWidget(this);
-    m_topWidget->setFixedHeight(60);
-
-    // ===== 1. 定义统一的样式常量（仅保留topWidget背景，Label改为透明）=====
-    //const QString TOP_BG_COLOR = "#f2f2f2";
-    m_topWidget->setStyleSheet(QString("background-color: #f2f2f2; border-bottom: 1px solid #dcdcdc;"));
+    applyContainerStyle(m_topWidget, 0, 60, "#f2f2f2");
 
     QHBoxLayout *topLayout = new QHBoxLayout(m_topWidget);
-    topLayout->setContentsMargins(10, 5, 10, 5);
+    topLayout->setContentsMargins(5, 5, 5, 5);
     topLayout->setSpacing(5);
 
-    // === 1. 样式准备 ===
-    QFont labelFont;
-    labelFont.setPointSize(11);
-    // 定义通用 Label 样式
-    QString labelStyle = "QLabel { background-color: transparent; color: #333333; border: none; padding: 0px; }";
+    // 1. 创建左侧隐藏按钮
+    btn_ui_HideTop = createIconButton(ElaIconType::Desktop, SLOT(on_btn_ui_HideTop_clicked()));
 
-    // === 辅助 Lambda 1：按钮通用设置  ===
-    QString iconBtnStyle = "ElaIconButton { background-color: #FFFFFF; border: 0px solid #C0C0C0; border-radius: 4px; }"
-                             "ElaIconButton:hover { background-color: #E6E6E6; border: 1px solid #A0A0A0; }";
-    auto setupIconButton = [&](ElaIconButton* btn) {
-        btn->setFixedSize(34, 34);
-        btn->setStyleSheet(iconBtnStyle);
-        btn->setAttribute(Qt::WA_StyledBackground, true);
-    };
-    // === 辅助 Lambda2：添加带有标题的控制组 ===
-    // 自动添加：分隔线 -> 标题 Label -> 控件列表
-    auto addControlGroup = [&](QString title, const std::vector<QWidget*>& widgets) {
-        // 1. 加竖线
-        QFrame *line = new QFrame(this);
-        line->setFrameShape(QFrame::VLine);
-        line->setStyleSheet("color: #A0A0A0;");
-        line->setFixedHeight(24);
-        topLayout->addSpacing(5);
-        topLayout->addWidget(line);
-        topLayout->addSpacing(5);
+    // 2. HID 状态标签
+    lbl_vid_HIDStatus = new QLabel("等待操作", this);
+    lbl_vid_HIDStatus->setStyleSheet(Styles::LABEL_FONT);
 
-        // 2. 加标题
-        QLabel *lbl = new QLabel(title, this);
-        lbl->setStyleSheet(labelStyle);
-        lbl->setFont(labelFont); // 假设 labelFont 在外部定义了
-        topLayout->addWidget(lbl);
-        topLayout->addSpacing(5);
-
-        // 3. 加控件
-        for(auto w : widgets) {
-            topLayout->addWidget(w);
-        }
+    // 3. 创建单选按钮 (利用 Lambda 简化设置)
+    auto setupRadio = [&](const QString& text, bool checked = false) {
+        ElaRadioButton* rb = new ElaRadioButton(text, this);
+        rb->setStyleSheet(Styles::RADIO_BTN);
+        rb->setEnabled(checked);
+        if(checked) rb->setChecked(true);
+        return rb;
     };
 
-    // === 2. 实例化控件 ===
-    // --- 隐藏顶部按钮（注释保留）---
-    btn_ui_HideTop = new ElaIconButton(ElaIconType::Desktop, this);
-    setupIconButton(btn_ui_HideTop);
-    connect(btn_ui_HideTop, &ElaIconButton::clicked, this, &ui_display::on_btn_ui_HideTop_clicked);
+    rbt_hid_EnCtrl = setupRadio("关闭", true);
+    rbt_hid_AbsMode = setupRadio("普通");
+    rbt_hid_RefMode = setupRadio("触控");
 
-    // --- HID 部分控件 ---
-    lbl_vid_HIDStatus = new QLabel("等待操作",this);
-    lbl_vid_HIDStatus->setFont(labelFont);
-    lbl_vid_HIDStatus->setStyleSheet(labelStyle);
+    // 连接信号逻辑
+    connect(rbt_hid_EnCtrl, &ElaRadioButton::toggled, this, [=](bool c){ if(c) {
+            m_HidManager->setControlMode(MODE_NONE); if(lbl_ui_VideoShow) lbl_ui_VideoShow->setCursor(Qt::ArrowCursor); }});
 
-    rbt_hid_EnCtrl = new ElaRadioButton("关闭",this);
-    rbt_hid_EnCtrl->setFont(labelFont);
-    rbt_hid_EnCtrl->setChecked(true);
+    connect(rbt_hid_AbsMode, &ElaRadioButton::toggled, this, [=](bool c){ if(c) {
+            m_HidManager->setControlMode(MODE_ABSOLUTE); if(lbl_ui_VideoShow) lbl_ui_VideoShow->setCursor(Qt::CrossCursor); }});
 
-    rbt_hid_AbsMode = new ElaRadioButton("普通",this);
-    rbt_hid_AbsMode->setFont(labelFont);
-    rbt_hid_AbsMode->setEnabled(false);
+    connect(rbt_hid_RefMode, &ElaRadioButton::toggled, this, [=](bool c){ if(c) {
+            m_HidManager->setControlMode(MODE_RELATIVE); if(lbl_ui_VideoShow) lbl_ui_VideoShow->setCursor(Qt::OpenHandCursor); }});
 
-    rbt_hid_RefMode = new ElaRadioButton("触控",this);
-    rbt_hid_RefMode->setFont(labelFont);
-    rbt_hid_RefMode->setEnabled(false);
-
-    //////////////////////////////////////////////////////////////////////////////////
-    // [禁用模式]
-    connect(rbt_hid_EnCtrl, &ElaRadioButton::toggled, this, [=](bool checked){
-        if (checked) {
-            m_HidManager->setControlMode(MODE_NONE);
-            // 可以在这里恢复鼠标样式为普通箭头
-            if(lbl_ui_VideoShow) lbl_ui_VideoShow->setCursor(Qt::ArrowCursor);
-            qDebug() << "HID Mode: None";
-        }
-    });
-    // [绝对模式] (点击操作)
-    connect(rbt_hid_AbsMode, &ElaRadioButton::toggled, this, [=](bool checked){
-        if (checked) {
-            m_HidManager->setControlMode(MODE_ABSOLUTE);
-            // 绝对模式下，通常使用十字光标方便定位
-            if(lbl_ui_VideoShow) lbl_ui_VideoShow->setCursor(Qt::CrossCursor);
-            qDebug() << "HID Mode: Absolute";
-        }
-    });
-    // [相对模式] (触控操作)
-    connect(rbt_hid_RefMode, &ElaRadioButton::toggled, this, [=](bool checked){
-        if (checked) {
-            m_HidManager->setControlMode(MODE_RELATIVE);
-            // 相对模式下，设置光标为手掌
-            if(lbl_ui_VideoShow) lbl_ui_VideoShow->setCursor(Qt::OpenHandCursor);
-            qDebug() << "HID Mode: Relative";
-        }
-    });
-    //////////////////////////////////////////////////////////////////////////////////
-
+    // 4. 其他控件
     cmb_hid_MutKeySel = new ElaComboBox(this);
     cmb_hid_MedKeySel = new ElaComboBox(this);
-
     btn_hid_KeySend = new ElaPushButton("发送", this);
     btn_hid_KeySend->setFixedWidth(60);
 
-    // --- 视频控制图标 ---
-    btn_vid_FullScr = new ElaIconButton(ElaIconType::Expand, this);
-    setupIconButton(btn_vid_FullScr);
-    connect(btn_vid_FullScr, &ElaIconButton::clicked, this, &ui_display::on_btn_vid_FullScr_clicked);
+    // 5. 视频/音频按钮 (使用工厂函数)
+    btn_vid_FullScr = createIconButton(ElaIconType::Expand, SLOT(on_btn_vid_FullScr_clicked()));
+    btn_vid_StrOn = createIconButton(ElaIconType::Pause, SLOT(on_btn_vid_StrOn_clicked()));
+    btn_vid_PicCap = createIconButton(ElaIconType::Camera, SLOT(on_btn_vid_PicCap_clicked()));
+    btn_aud_OnOff = createIconButton(ElaIconType::VolumeHigh, nullptr);
 
-    btn_vid_StrOn = new ElaIconButton(ElaIconType::Pause, this);
-    setupIconButton(btn_vid_StrOn);
-    connect(btn_vid_StrOn, &ElaIconButton::clicked, this, &ui_display::on_btn_vid_StrOn_clicked);
-
-    btn_vid_PicCap = new ElaIconButton(ElaIconType::Camera, this);
-    setupIconButton(btn_vid_PicCap);
-    connect(btn_vid_PicCap, &ElaIconButton::clicked, this, &ui_display::on_btn_vid_PicCap_clicked);
-
-    // --- 音频图标 ---
-    btn_aud_OnOff = new ElaIconButton(ElaIconType::VolumeHigh, this);
-    setupIconButton(btn_aud_OnOff);
-
-    // === 3. 布局添加 ===
+    // === 组装布局 (极简模式) ===
     topLayout->addWidget(btn_ui_HideTop);
     topLayout->addSpacing(5);
     topLayout->addWidget(lbl_vid_HIDStatus);
-    // 第一组：HID基础
-    addControlGroup("键鼠", {rbt_hid_EnCtrl, rbt_hid_AbsMode, rbt_hid_RefMode});
-    // 第二组：HID快捷键 (使用 Lambda)
-    addControlGroup("快捷键", {cmb_hid_MutKeySel, cmb_hid_MedKeySel, btn_hid_KeySend});
-    // 第三组：视频控制 (使用 Lambda)
-    addControlGroup("视频控制", {btn_vid_FullScr, btn_vid_StrOn, btn_vid_PicCap});
-    // 第四组：音频控制 (使用 Lambda)
-    addControlGroup("音频控制", {btn_aud_OnOff});
+
+    addTopControlGroup(topLayout, "键鼠", {rbt_hid_EnCtrl, rbt_hid_AbsMode, rbt_hid_RefMode});
+    addTopControlGroup(topLayout, "快捷键", {cmb_hid_MutKeySel, cmb_hid_MedKeySel, btn_hid_KeySend});
+    addTopControlGroup(topLayout, "视频控制", {btn_vid_FullScr, btn_vid_StrOn, btn_vid_PicCap});
+    addTopControlGroup(topLayout, "音频控制", {btn_aud_OnOff});
 
     topLayout->addStretch();
 }
 
-void ui_display::initCenter(QWidget * centerContainer)
+void ui_display::initCenter(QWidget *centerContainer)
 {
-    // === 左侧视频容器 ===
     m_videoContainer = new QWidget(centerContainer);
-    m_videoContainer->setStyleSheet("background-color: black;"); // 黑底
+    m_videoContainer->setStyleSheet("background-color: black;");
 
-    // 1. 视频 Label (底层背景)
+    // 1. 视频标签
     lbl_ui_VideoShow = new QLabel("Loading Signal...", m_videoContainer);
     lbl_ui_VideoShow->setAlignment(Qt::AlignCenter);
     lbl_ui_VideoShow->setStyleSheet("color: white; font-size: 20px;");
-    // 忽略尺寸策略，允许缩放
     lbl_ui_VideoShow->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Ignored);
-    lbl_ui_VideoShow->setScaledContents(false);
 
-    //键盘鼠标HIDKVM设备设置类
-    // === 将 VideoLabel 的事件交给 HidProcess 处理 ===
-    lbl_ui_VideoShow->setMouseTracking(false); // 相对模式不需要时刻追踪，只在按下时追踪，具体看逻辑需要
-    lbl_ui_VideoShow->installEventFilter(m_HidManager); // 拦截鼠标
-    // === 将 整个窗口 的键盘事件也交给 HidProcess 处理 ===
-    this->setFocusPolicy(Qt::StrongFocus); // 确保能接收键盘
-    this->installEventFilter(m_HidManager); // 拦截键盘
+    // 安装事件过滤器
+    lbl_ui_VideoShow->setMouseTracking(false);
+    lbl_ui_VideoShow->installEventFilter(m_HidManager);
+    this->setFocusPolicy(Qt::StrongFocus);
+    this->installEventFilter(m_HidManager);
 
-    // 2. 悬浮按钮 (顶层控件)
-    // 注意：不再需要手动 move，也不需要后续计算坐标
+    // 2. 悬浮按钮
     btn_ui_HideSide = new ElaIconButton(ElaIconType::AngleRight, m_videoContainer);
     btn_ui_HideSide->setFixedSize(40, 40);
     btn_ui_HideSide->setBorderRadius(20);
@@ -532,68 +542,43 @@ void ui_display::initCenter(QWidget * centerContainer)
     btn_ui_HideSide->setLightIconColor(Qt::red);
     connect(btn_ui_HideSide, &ElaIconButton::clicked, this, &ui_display::on_btn_ui_HideSide_clicked);
 
-    // === 核心修改：使用 Grid 布局实现自动堆叠与定位 ===
+    // 3. 堆叠布局
     QGridLayout *vidLayout = new QGridLayout(m_videoContainer);
     vidLayout->setContentsMargins(0, 0, 0, 0);
-
-    // 第一步：把视频 Label 铺满 (0,0)
     vidLayout->addWidget(lbl_ui_VideoShow, 0, 0);
-
-    // 第二步：把按钮也加到 (0,0)，但指定 "右对齐 + 垂直居中"
-    // 布局管理器会自动把它叠在上面，并随着窗口大小变化自动调整位置
     vidLayout->addWidget(btn_ui_HideSide, 0, 0, Qt::AlignRight | Qt::AlignVCenter);
 
-    // 第三步：确保按钮在最上层 (虽然通常后添加的在上面，但这行更保险)
     btn_ui_HideSide->raise();
 }
+
 void ui_display::initSideBar()
 {
     m_sideBarWidget = new QWidget(this);
-    m_sideBarWidget->setFixedWidth(200);
-    m_sideBarWidget->setStyleSheet("background-color: #fafafa; border-left: 1px solid #d0d0d0;");
+    applyContainerStyle(m_sideBarWidget, 170, 0, "#fafafa");
 
     QVBoxLayout *sideLayout = new QVBoxLayout(m_sideBarWidget);
-    sideLayout->setContentsMargins(15, 15, 15, 15);
-    sideLayout->setSpacing(15);
+    sideLayout->setContentsMargins(5, 5, 5, 5);
+    sideLayout->setSpacing(0);
 
-    // === 定义统一的 Label 样式 (透明背景) ===
-    QString transparentStyle = "QLabel { background-color: transparent; color: #333333; border: none; padding: 0px; }";
-    QFont labelFont;
-    labelFont.setPointSize(11);
-    // === 核心优化：定义辅助 Lambda 函数 ===
-    // 作用：自动创建Label，应用样式，并将 Label 和 对应的控件(Widget) 一起加入布局
-    auto addSettingItem = [&](QBoxLayout* layout, QString text, QWidget* widget) {
-        QLabel* lbl = new QLabel(text, m_sideBarWidget);
-        lbl->setStyleSheet(transparentStyle);
-        lbl->setFont(labelFont);
-        layout->addWidget(lbl);    // 加 Label
-        layout->addWidget(widget); // 加 控件 (如 ComboBox)
-    };
-
-    // --- 2.1 视频设置部分 ---
+    // --- 1. 视频设置 Group ---
     QGroupBox *grpVideo = new QGroupBox("视频设置", m_sideBarWidget);
     QVBoxLayout *vBox = new QVBoxLayout(grpVideo);
 
-    // 初始化控件
     cmb_vid_FmtSelect = new ElaComboBox(grpVideo);
     cmb_vid_ResSelect = new ElaComboBox(grpVideo);
     cmb_vid_FpsSelect = new ElaComboBox(grpVideo);
     btn_vid_SetApply = new ElaPushButton("应用视频修改", grpVideo);
 
-    // 连接信号
-    connect(cmb_vid_FmtSelect, QOverload<int>::of(&ElaComboBox::currentIndexChanged),
-            this, &ui_display::on_cmb_vid_FmtSelect_currentIndexChanged);
-    connect(cmb_vid_ResSelect, QOverload<int>::of(&ElaComboBox::currentIndexChanged),
-            this, &ui_display::on_cmb_vid_ResSelect_currentIndexChanged);
+    connect(cmb_vid_FmtSelect, QOverload<int>::of(&ElaComboBox::currentIndexChanged), this, &ui_display::on_cmb_vid_FmtSelect_currentIndexChanged);
+    connect(cmb_vid_ResSelect, QOverload<int>::of(&ElaComboBox::currentIndexChanged), this, &ui_display::on_cmb_vid_ResSelect_currentIndexChanged);
     connect(btn_vid_SetApply, &ElaPushButton::clicked, this, &ui_display::on_btn_vid_SetApply_clicked);
 
-    // === 修改后：极简的添加逻辑 ===
-    addSettingItem(vBox, "格式:", cmb_vid_FmtSelect);
-    addSettingItem(vBox, "分辨率:", cmb_vid_ResSelect);
-    addSettingItem(vBox, "帧率:", cmb_vid_FpsSelect);
-    vBox->addWidget(btn_vid_SetApply); // 按钮单独加
+    addSideSettingItem(vBox, "格式:", cmb_vid_FmtSelect);
+    addSideSettingItem(vBox, "分辨率:", cmb_vid_ResSelect);
+    addSideSettingItem(vBox, "帧率:", cmb_vid_FpsSelect);
+    vBox->addWidget(btn_vid_SetApply);
 
-    // --- 2.2 HID设置部分 ---
+    // --- 2. HID 设置 Group ---
     QGroupBox *grpHid = new QGroupBox("HID设置", m_sideBarWidget);
     QVBoxLayout *hBox = new QVBoxLayout(grpHid);
 
@@ -602,15 +587,53 @@ void ui_display::initSideBar()
     cmb_hid_DevSelect = new ElaComboBox(grpHid);
     btn_hid_SetApply = new ElaPushButton("应用HID修改", grpHid);
 
-    // === 修改后：极简的添加逻辑 ===
-    addSettingItem(hBox, "串口选择:", cmb_hid_UartSelect);
-    addSettingItem(hBox, "波特率:", cmb_hid_BtrSelect);
-    addSettingItem(hBox, "设备选择:", cmb_hid_DevSelect);
-    hBox->addWidget(btn_hid_SetApply);
     connect(btn_hid_SetApply, &ElaPushButton::clicked, this, &ui_display::on_btn_hid_SetApply_clicked);
 
-    // 添加 GroupBox 到主侧边栏
+    addSideSettingItem(hBox, "串口选择:", cmb_hid_UartSelect);
+    addSideSettingItem(hBox, "波特率:", cmb_hid_BtrSelect);
+    addSideSettingItem(hBox, "设备选择:", cmb_hid_DevSelect);
+    hBox->addWidget(btn_hid_SetApply);
+
+    // --- 3. IP-KVM Group ---
+    QGroupBox *grpIpKvm = new QGroupBox("IP-KVM", m_sideBarWidget);
+    QVBoxLayout *aBox = new QVBoxLayout(grpIpKvm);
+
+    // IP 显示逻辑
+    QString localIp = "127.0.0.1";
+    for (const QHostAddress &address : QNetworkInterface::allAddresses()) {
+        if (address.protocol() == QAbstractSocket::IPv4Protocol && address != QHostAddress::LocalHost) {
+             localIp = address.toString();
+             if(localIp.startsWith("192.168.")) break;
+        }
+    }
+
+    // 手动布局 IP 行 (因为它比较特殊，有两个Label)
+    QHBoxLayout *layIp = new QHBoxLayout();
+    QLabel* lblIpTag = new QLabel("IP:", grpIpKvm); lblIpTag->setStyleSheet(Styles::LABEL_FONT);
+    QLabel* lblIpVal = new QLabel(localIp, grpIpKvm); lblIpVal->setStyleSheet(Styles::LABEL_FONT);
+    lblIpVal->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    layIp->addWidget(lblIpTag);
+    layIp->addWidget(lblIpVal);
+    layIp->addStretch();
+
+    // 端口行
+    QHBoxLayout *layPort = new QHBoxLayout();
+    QLabel* lblPort = new QLabel("端口:", grpIpKvm); lblPort->setStyleSheet(Styles::LABEL_FONT);
+    txt_web_Port = new QLineEdit("8080", grpIpKvm);
+    btn_web_Start = new ElaToggleButton("开启", grpIpKvm);
+    btn_web_Start->setFixedWidth(50);
+    connect(btn_web_Start, &ElaToggleButton::toggled, this, &ui_display::on_btn_web_Start_clicked);
+
+    layPort->addWidget(lblPort);
+    layPort->addWidget(txt_web_Port);
+    layPort->addWidget(btn_web_Start);
+
+    aBox->addLayout(layIp);
+    aBox->addLayout(layPort);
+
+    // 添加所有 Group
     sideLayout->addWidget(grpVideo);
     sideLayout->addWidget(grpHid);
+    sideLayout->addWidget(grpIpKvm);
     sideLayout->addStretch();
 }

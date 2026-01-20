@@ -3,6 +3,7 @@
 
 #include <QImage>
 #include <QObject>
+#include <QVector>
 
 // Linux headers
 #include <linux/videodev2.h>
@@ -34,14 +35,33 @@ public:
     void stopCapturing();
     bool isCapturing() const;
 
-    // 获取一帧图像 (核心功能)
+    // === [新增] 拆分 API (支持分流架构) ===
+
+    // 1. 出队：获取一帧原始数据 (阻塞等待)
+    //    返回: 原始数据指针 (失败返回 nullptr)
+    //    out_len: 数据长度
+    //    out_index: 缓冲区索引 (用于 enqueue)
+    uint8_t* dequeue(size_t &out_len, int &out_index);
+
+    // 2. 入队：归还缓冲区给内核
+    void enqueue(int index);
+
+    // 3. 转换：将原始数据转为 QImage (用于 UI 显示)
+    //    支持 YUYV (软转码) 和 MJPEG (软解码)
+    void toQImage(const uint8_t* rawData, size_t len, QImage &outImage);
+
+    // [兼容旧接口] 内部自动调用上述三个函数
     bool captureFrame(QImage &image);
+
+    // 获取当前像素格式 (供 VideoThread 判断是否允许转发)
+    unsigned int getPixelFormat() const { return m_pixelFormat; }
 
 private:
     // 内部辅助函数
     void initMmap();
     void freeMmap();
-    void yuyv_to_rgb(unsigned char *yuyv, unsigned char *rgb, int width, int height);
+    // 注意：这里改为 const 输入
+    void yuyv_to_rgb(const unsigned char *yuyv, unsigned char *rgb, int width, int height);
 
 private:
     QString m_devicePath;
@@ -57,9 +77,8 @@ private:
     int m_height;
     unsigned int m_pixelFormat;
 
-    // 缓存池
+    // 缓存池 (RGB数据容器)
     QVector<unsigned char> m_rgbBuffer;
 };
-
 
 #endif // DRV_CAMERA_H

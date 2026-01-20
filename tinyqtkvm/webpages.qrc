@@ -1,0 +1,6 @@
+<RCC>
+    <qresource prefix="/">
+        <file>index.html</file>
+        <file>jmuxer.min.js</file>
+    </qresource>
+</RCC>

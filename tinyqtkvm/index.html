@@ -1,0 +1,218 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>RK3566 IP-KVM</title>
+    <script src="jmuxer.min.js"></script>
+    <style>
+        body { background: #333; color: #fff; text-align: center; margin: 0; overflow: hidden; font-family: sans-serif; }
+
+        /* 视频容器 */
+        #video-container {
+            display: flex; justify-content: center; align-items: center;
+            height: 100vh; width: 100vw;
+        }
+        video { border: 1px solid #555; max-width: 100%; max-height: 100%; }
+
+        /* 顶部控制栏 */
+        #toolbar {
+            position: absolute; top: 0; left: 0; right: 0;
+            background: rgba(0, 0, 0, 0.7);
+            padding: 10px;
+            display: flex; justify-content: space-between; align-items: center;
+            z-index: 100;
+        }
+        .status-group { font-size: 14px; color: #ccc; }
+        .status-ok { color: #0f0; }
+        .status-err { color: #f00; }
+
+        button {
+            background: #444; color: white; border: 1px solid #666;
+            padding: 5px 15px; margin-left: 10px; cursor: pointer;
+            border-radius: 4px;
+        }
+        button:hover { background: #555; }
+        button.active { background: #0078D4; border-color: #005A9E; }
+        button.warn { background: #d44; border-color: #a00; }
+    </style>
+</head>
+<body>
+
+    <div id="toolbar">
+        <div class="status-group">
+            Status: <span id="ws-status" class="status-err">Disconnected</span>
+        </div>
+        <div class="control-group">
+            <button id="btn-hid" onclick="toggleHid()">HID: OFF</button>
+            <button id="btn-pause" onclick="toggleVideo()">Video: Playing</button>
+        </div>
+    </div>
+
+    <div id="video-container">
+        <video id="player" autoplay muted oncontextmenu="return false;"></video>
+    </div>
+
+<script>
+    // --- 全局状态 ---
+    let isHidEnabled = false; // HID 默认关闭，防止误触
+    let isVideoPaused = false;
+    let ws = null;
+    let jmuxer = new JMuxer({ node: 'player', mode: 'video', flushingTime: 0, fps: 30, debug: false });
+
+    // --- 1. WebSocket 连接管理 (含断线重连) ---
+    function connectWs() {
+        updateStatus("Connecting...", "status-err");
+
+        ws = new WebSocket("ws://" + location.host);
+        ws.binaryType = 'arraybuffer';
+
+        ws.onopen = () => {
+            updateStatus("Connected", "status-ok");
+        };
+
+        ws.onclose = () => {
+            updateStatus("Disconnected. Retrying in 2s...", "status-err");
+            // 断线重连机制
+            setTimeout(connectWs, 2000);
+        };
+
+        ws.onerror = (e) => {
+            console.error("WS Error:", e);
+            ws.close(); // 触发 onclose 进行重连
+        };
+
+        ws.onmessage = (event) => {
+            // 视频暂停机制：暂停时不喂数据给播放器
+            if (!isVideoPaused) {
+                jmuxer.feed({ video: new Uint8Array(event.data) });
+            }
+        };
+    }
+
+    // 启动连接
+    connectWs();
+
+    // --- 2. 界面交互逻辑 ---
+    function updateStatus(text, className) {
+        const el = document.getElementById('ws-status');
+        el.innerText = text;
+        el.className = className;
+    }
+
+    function toggleHid() {
+        isHidEnabled = !isHidEnabled;
+        const btn = document.getElementById('btn-hid');
+        btn.innerText = "HID: " + (isHidEnabled ? "ON" : "OFF");
+        btn.className = isHidEnabled ? "active" : "";
+    }
+
+    function toggleVideo() {
+        isVideoPaused = !isVideoPaused;
+        const btn = document.getElementById('btn-pause');
+        if (isVideoPaused) {
+            btn.innerText = "Video: Paused";
+            btn.className = "warn";
+        } else {
+            btn.innerText = "Video: Playing";
+            btn.className = "";
+        }
+    }
+
+    // --- 3. HID 发送辅助函数 ---
+    const kLeftCtrl = 1, kLeftShift = 2, kLeftAlt = 4, kLeftSuper = 8;
+
+    function sendReport(data) {
+        // HID总开关 && 连接状态检查
+        if (isHidEnabled && ws && ws.readyState === WebSocket.OPEN) {
+            ws.send(new Uint8Array(data));
+        }
+    }
+
+    function getModifiers(event) {
+        let mods = 0;
+        if (event.ctrlKey) mods |= kLeftCtrl;
+        if (event.shiftKey) mods |= kLeftShift;
+        if (event.altKey) mods |= kLeftAlt;
+        if (event.metaKey) mods |= kLeftSuper;
+        return mods;
+    }
+
+    function getHidCode(event) {
+        // 简易键值映射 (仅作示例，建议补充完整)
+        const code = event.which;
+        if (code >= 65 && code <= 90) return code - 65 + 4; // A-Z
+        if (code >= 48 && code <= 57) return code - 48 + 30; // 0-9
+        if (event.code === 'Enter') return 40;
+        if (event.code === 'Backspace') return 42;
+        if (event.code === 'Space') return 44;
+        return 0;
+    }
+
+    // --- 4. 鼠标事件处理 ---
+    const video = document.getElementById('player');
+
+    function handleMouse(e) {
+        if (!isHidEnabled || video.videoWidth === 0) return;
+
+        const rect = video.getBoundingClientRect();
+        // 计算 0-32767 的绝对坐标
+        let x = Math.round((e.clientX - rect.left) * 32767 / rect.width);
+        let y = Math.round((e.clientY - rect.top) * 32767 / rect.height);
+
+        x = Math.max(0, Math.min(32767, x));
+        y = Math.max(0, Math.min(32767, y));
+
+        // Protocol Type 0x02: [0x02, Buttons, X_L, X_H, Y_L, Y_H, Wheel]
+        const report = [
+            0x02,
+            e.buttons,
+            x & 0xFF, (x >> 8) & 0xFF,
+            y & 0xFF, (y >> 8) & 0xFF,
+            0
+        ];
+        sendReport(report);
+    }
+
+    // 监听视频区域的鼠标事件
+    video.addEventListener('mousemove', handleMouse);
+    video.addEventListener('mousedown', handleMouse);
+    video.addEventListener('mouseup', handleMouse);
+
+    // --- 5. 键盘事件处理 ---
+    let keysDown = new Set();
+
+    function handleKey(e, isDown) {
+        // 只有开启HID且鼠标悬停在视频上(可选)时才拦截
+        // 这里简化为：只要HID开启就拦截所有按键
+        if (!isHidEnabled) return;
+
+        // 允许 F12 (调试) 和 F5 (刷新)
+        if (e.code !== 'F12' && e.code !== 'F5') {
+            e.preventDefault();
+        }
+
+        const hidCode = getHidCode(e);
+        // 如果没有有效键值且没有修饰键，忽略
+        if (hidCode === 0 && !e.ctrlKey && !e.altKey && !e.shiftKey) return;
+
+        if (isDown) keysDown.add(hidCode);
+        else keysDown.delete(hidCode);
+
+        let firstKey = 0;
+        for (let k of keysDown) { if (k !== 0) { firstKey = k; break; } }
+
+        // Protocol Type 0x01: [0x01, Modifiers, KeyCode]
+        const report = [
+            0x01,
+            getModifiers(e),
+            firstKey
+        ];
+        sendReport(report);
+    }
+
+    window.addEventListener('keydown', (e) => handleKey(e, true));
+    window.addEventListener('keyup', (e) => handleKey(e, false));
+
+</script>
+</body>
+</html>

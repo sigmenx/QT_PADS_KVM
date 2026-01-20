@@ -4,7 +4,9 @@
 #include <QThread>
 #include <QMutex>
 #include <QWaitCondition>
-#include "drv_camera.h"
+#include "../Driver/drv_camera.h"
+#include "../Driver/drv_webserver.h"
+#include "../Tool/videoencoder.h"
 
 class VideoController : public QThread
 {
@@ -26,6 +28,12 @@ public:
     // 彻底退出线程 (析构时调用)
     void quitThread();
 
+    //server相关 开启视频转发
+    bool startServer(int port);
+
+    //关闭视频转发
+    void stopServer();
+
     CameraDevice* m_camera;
 
 protected:
@@ -35,11 +43,14 @@ protected:
 signals:
     // 每一帧处理完发送信号
     void frameReady(QImage image);
+
+    //向 ui线程 发送网络传入的 键鼠控制 信息
+    //void remoteHidPacketReceived(std::vector<uint8_t> data);
+
     // 错误信号
     //void errorOccurred(QString msg);
 
 private:
-
 
     // --- 线程同步与状态变量 ---
     QMutex m_mutex;
@@ -47,13 +58,27 @@ private:
 
     bool m_abort;        // true: 彻底退出线程 loop
     bool m_pause;        // true: 暂停采集
-    bool m_reconfig;     // true: 需要重新配置摄像头参数
 
-    // --- 缓存的摄像头参数 ---
-    int m_width;
-    int m_height;
-    unsigned int m_fmt;
-    int m_fps;
+    // --- 重配参数标志位 ---
+    bool m_dirtyCamera;  // 只有分辨率/格式改变时置 true
+    bool m_dirtyNetwork; // 只有开关网络服务时置 true
+
+    // --- 期望参数 ---
+    // 主线程只管写这些变量，子线程负责读取并应用
+    int m_cfgWidth;
+    int m_cfgHeight;
+    unsigned int m_cfgFmt;
+    int m_cfgFps;
+    bool m_cfgNetOn; // 期望的网络开关状态
+    int m_cfgPort;
+
+    // --- 实际运行资源 ---
+    VideoEncoder *m_encoder;
+    WebServer *m_server;
+
+    // 内部状态同步函数
+    void syncHardwareState();
+
 };
 
 #endif // PRO_VIDEOTHREAD_H

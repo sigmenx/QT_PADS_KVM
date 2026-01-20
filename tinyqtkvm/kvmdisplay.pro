@@ -9,29 +9,40 @@ CONFIG += c++11
 #DEFINES += QT_DISABLE_DEPRECATED_BEFORE=0x060000    # disables all the APIs deprecated before Qt 6.0.0
 
 SOURCES += \
-    drv_camera.cpp \
-    main.cpp \
-    pro_hidcontroller.cpp \
-    drv_ch9329.cpp \
-    pro_videothread.cpp \
-    ui_display.cpp \
-    ui_mainpage.cpp
+    main.cpp                        \
+    Driver/drv_webserver.cpp        \
+    Driver/drv_camera.cpp           \
+    Driver/drv_ch9329.cpp           \
+    Controller/pro_hidcontroller.cpp\
+    Controller/pro_videothread.cpp  \
+    QtUiPage/ui_display.cpp         \
+    QtUiPage/ui_mainpage.cpp        \
+    Tool/videoencoder.cpp
 
 HEADERS += \
-    drv_camera.h \
-    pro_hidcontroller.h \
-    drv_ch9329.h\
-    pro_videothread.h \
-    ui_display.h \
-    ui_mainpage.h
+    Driver/drv_camera.h           \
+    Driver/drv_ch9329.h           \
+    Driver/drv_webserver.h        \
+    Controller/pro_hidcontroller.h\
+    Controller/pro_videothread.h  \
+    QtUiPage/ui_display.h         \
+    QtUiPage/ui_mainpage.h        \
+    Tool/videoencoder.h           \
+    Tool/safe_queue.h
 
-FORMS += \
-    ui_mainpage.ui
+FORMS += QtUiPage/ui_mainpage.ui
+
+RESOURCES += webpages.qrc
 
 # Default rules for deployment.
 qnx: target.path = /tmp/$${TARGET}/bin
 else: unix:!android: target.path = /opt/$${TARGET}/bin
 !isEmpty(target.path): INSTALLS += target
+
+# 引入 FFmpeg库
+LIBS += -lavcodec  -lavutil -lswscale
+# 引入 OpenSSL库
+LIBS += -lcrypto
 
 # ElaWidgetTools 配置
 INCLUDEPATH += $$PWD/SDK/ElaWidgetTools/include
